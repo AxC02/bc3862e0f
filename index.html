@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta name="robots" content="noindex, nofollow">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Budget</title>
+  <meta name="description" content="Austin's private budget. All data stays on this device.">
+  <meta name="theme-color" content="#0E0E10">
+  <meta name="color-scheme" content="dark">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Budget">
+  <meta name="format-detection" content="telephone=no">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="statusbar-shim" aria-hidden="true"></div>
+
+  <div id="app" class="app" hidden>
+    <main id="view" class="view" tabindex="-1"></main>
+
+    <button id="fab" class="fab" type="button" aria-label="Add a purchase or savings">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+    </button>
+
+    <nav class="tabbar" aria-label="Sections">
+      <button type="button" class="tab" data-tab="home" aria-label="Home">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 10.5 12 3.5l8.5 7V20a1 1 0 0 1-1 1h-5v-6h-5v6h-5a1 1 0 0 1-1-1z"/></svg>
+        <span>Home</span>
+      </button>
+      <button type="button" class="tab" data-tab="activity" aria-label="Activity">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6h12M8 12h12M8 18h12"/><circle cx="4" cy="6" r="1.2"/><circle cx="4" cy="12" r="1.2"/><circle cx="4" cy="18" r="1.2"/></svg>
+        <span>Activity</span>
+      </button>
+      <button type="button" class="tab" data-tab="subs" aria-label="Subscriptions">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12a8 8 0 0 1 13.7-5.6L20 8.7M20 4v4.7h-4.7M20 12a8 8 0 0 1-13.7 5.6L4 15.3M4 20v-4.7h4.7"/></svg>
+        <span>Subscriptions</span>
+      </button>
+      <button type="button" class="tab" data-tab="goals" aria-label="Goals">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="4.5"/><circle cx="12" cy="12" r="0.8"/></svg>
+        <span>Goals</span>
+      </button>
+      <button type="button" class="tab" data-tab="settings" aria-label="Settings">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+        <span>Settings</span>
+      </button>
+    </nav>
+  </div>
+
+  <div id="sheet-root" class="sheet-root" aria-hidden="true"></div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <section id="lock" class="lock" aria-label="PIN lock">
+    <div class="lock-inner">
+      <img class="lock-logo" src="icons/icon-192.png" alt="" width="72" height="72">
+      <h1 id="lock-title" class="lock-title">Enter PIN</h1>
+      <p id="lock-sub" class="lock-sub">&nbsp;</p>
+      <div id="lock-dots" class="lock-dots" aria-hidden="true"></div>
+      <div class="keypad" role="group" aria-label="PIN keypad">
+        <button type="button" class="key" data-key="1">1</button>
+        <button type="button" class="key" data-key="2">2<small>ABC</small></button>
+        <button type="button" class="key" data-key="3">3<small>DEF</small></button>
+        <button type="button" class="key" data-key="4">4<small>GHI</small></button>
+        <button type="button" class="key" data-key="5">5<small>JKL</small></button>
+        <button type="button" class="key" data-key="6">6<small>MNO</small></button>
+        <button type="button" class="key" data-key="7">7<small>PQRS</small></button>
+        <button type="button" class="key" data-key="8">8<small>TUV</small></button>
+        <button type="button" class="key" data-key="9">9<small>WXYZ</small></button>
+        <button type="button" class="key key-text" id="lock-next" data-key="next">Next</button>
+        <button type="button" class="key" data-key="0">0</button>
+        <button type="button" class="key key-text" data-key="back" aria-label="Delete digit">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5h11a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H9l-6-7z"/><path d="m12 9 6 6M18 9l-6 6"/></svg>
+        </button>
+      </div>
+      <div class="lock-foot">
+        <button type="button" class="link" id="lock-cancel" hidden>Cancel</button>
+        <button type="button" class="link subtle" id="lock-forgot" hidden>Forgot PIN?</button>
+      </div>
+    </div>
+  </section>
+
+  <noscript><p class="noscript">This budget app needs JavaScript turned on.</p></noscript>
+  <script src="app.js"></script>
+</body>
+</html>
