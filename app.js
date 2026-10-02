@@ -1,4 +1,7 @@
-/* Budget — a private, offline, single-user budget PWA.
+/* Budget — private budget PWA. Progress is drawn as rings.
+   budget.data.v2 is the on-device store. The first launch copies budget.data.v1
+   and keeps pay, bills, the savings plan, the emergency goal, saved amounts,
+   goal progress, and savings deposits. Spending transactions are dropped.
    All data lives in localStorage on this device. Nothing is ever sent anywhere. */
 'use strict';
 
@@ -6,10 +9,11 @@
   // ==========================================================================
   // Constants & defaults
   // ==========================================================================
-  const DATA_KEY = 'budget.data.v1';
-  const PIN_KEY = 'budget.pin.v1';
-  const FAIL_KEY = 'budget.pinFails.v1';
-  const HIDDEN_KEY = 'budget.hiddenAt';
+  const DATA_KEY = 'budget.data.v2';
+  const LEGACY_DATA_KEY = 'budget.data.v1';
+  const PIN_KEY = 'budget.pin.v2';
+  const FAIL_KEY = 'budget.pinFails.v2';
+  const HIDDEN_KEY = 'budget.hiddenAt.v2';
   const LOCK_AFTER_MS = 60 * 1000;
   const COLORS = ['#B388FF', '#81C784', '#FFB74D', '#4FC3F7', '#F06292', '#9575CD', '#4DB6AC', '#E57373', '#AED581', '#FFD54F'];
   const SUBS_COLOR = '#CE93D8';
@@ -151,7 +155,21 @@
   function load() {
     try {
       const raw = localStorage.getItem(DATA_KEY);
-      state = normalize(raw ? JSON.parse(raw) : null);
+      if (raw) {
+        state = normalize(JSON.parse(raw));
+        return;
+      }
+      const legacy = localStorage.getItem(LEGACY_DATA_KEY);
+      if (legacy) {
+        state = normalize(JSON.parse(legacy));
+        // Next paycheck: clear spending. Keep savings deposits and goal progress.
+        state.transactions = state.transactions.filter((t) => t.type === 'savings');
+        if (save()) {
+          try { localStorage.removeItem(LEGACY_DATA_KEY); } catch { /* legacy copy can stay if removal fails */ }
+        }
+        return;
+      }
+      state = defaultData();
     } catch {
       state = defaultData();
     }
@@ -159,8 +177,10 @@
   function save() {
     try {
       localStorage.setItem(DATA_KEY, JSON.stringify(state));
+      return true;
     } catch {
       toast('Couldn’t save — device storage is full');
+      return false;
     }
   }
   function commit() { save(); render(); }
@@ -346,9 +366,17 @@
     upload: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V5m0 0-4 4m4-4 4 4M5 19h14"/></svg>',
   };
 
-  function bar(value, total, { over = false, variant = '', thick = false } = {}) {
+  /** Circular progress. Same percent math as the old bar (capped 0–100). Over budget stays red even when the arc is capped. */
+  function bar(value, total, { over = false, variant = '', thick = false, large = false } = {}) {
     const p = pct(value, total);
-    return `<div class="bar ${over ? 'over' : ''} ${variant} ${thick ? 'thick' : ''}" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(p)}"><i style="width:${p.toFixed(1)}%"></i></div>`;
+    const shown = Math.min(100, Math.max(0, p));
+    const cap = shown > 0.4 && shown < 99.9 ? 'round' : 'butt';
+    const cls = ['ring', over ? 'over' : '', variant, thick ? 'thick' : '', large ? 'lg' : ''].filter(Boolean).join(' ');
+    const gap = Math.max(0, 100 - shown);
+    return `<svg class="${cls}" viewBox="0 0 36 36" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(shown)}">
+      <circle class="ring-track" cx="18" cy="18" r="15.9155"></circle>
+      <circle class="ring-value" cx="18" cy="18" r="15.9155" stroke-linecap="${cap}" stroke-dasharray="${shown.toFixed(2)} ${gap.toFixed(2)}" transform="rotate(-90 18 18)"></circle>
+    </svg>`;
   }
 
   function pageHead(eyebrow, title, sub = '', action = '') {
@@ -361,10 +389,13 @@
     const attrs = c.id === 'subs' ? 'data-action="tab" data-tab="subs" role="button" tabindex="0"' : '';
     return `<div class="cat" ${attrs}>
       <div class="cat-top">
-        <div><div class="cat-name">${esc(c.name)}</div><div class="cat-amt">${money(c.spent)} of ${money(c.budget)}</div></div>
-        <div class="cat-left ${over ? 'bad' : 'good'}">${over ? `${money(-left)} over` : `${money(left)} left`}</div>
+        <div class="cat-copy">
+          <div class="cat-name">${esc(c.name)}</div>
+          <div class="cat-amt">${money(c.spent)} of ${money(c.budget)}</div>
+          <div class="cat-left ${over ? 'bad' : 'good'}">${over ? `${money(-left)} over` : `${money(left)} left`}</div>
+        </div>
+        ${bar(c.spent, c.budget, { over })}
       </div>
-      ${bar(c.spent, c.budget, { over })}
     </div>`;
   }
 
@@ -395,14 +426,24 @@
         ${due.paid.length ? `<p class="note">Paid: ${due.paid.map((i) => esc(i.name)).join(', ')}</p>` : ''}`;
     }
 
+    const budgetLeft = r2(st.budgetTotal - st.spent);
+    const budgetLeftPct = pct(Math.max(0, budgetLeft), st.budgetTotal);
+    const ringCaption = overall
+      ? `Over this month’s budget by ${money(st.spent - st.budgetTotal)}`
+      : `${Math.round(budgetLeftPct)}% of this month’s budget still left`;
     return `
-      ${pageHead('This Month', monthLabel(ym, { month: 'long' }), esc(sub))}
-      <section class="hero" aria-label="Left to spend">
-        <div class="hero-label">Left to spend</div>
-        <div class="hero-amount ${st.flexible < 0 ? 'neg' : ''}" id="left-to-spend">${money(st.flexible)}</div>
-        <div class="hero-caption">After unpaid bills and the savings still to go</div>
-        <div class="hero-stats">
-          <div class="hero-stat"><span>Per day</span><strong class="${st.daily < 0 ? 'neg' : ''}">${money(st.daily)}</strong></div>
+      ${pageHead('Circle view', monthLabel(ym, { month: 'long' }), esc(sub))}
+      <section class="hero hero-circle" aria-label="Left to spend">
+        <div class="hero-ring-wrap">
+          ${bar(overall ? st.budgetTotal : Math.max(0, budgetLeft), st.budgetTotal || 1, { over: overall, large: true })}
+          <div class="hero-ring-center">
+            <div class="hero-label">Left to spend</div>
+            <div class="hero-amount ${st.flexible < 0 ? 'neg' : ''}" id="left-to-spend">${money(st.flexible)}</div>
+            <div class="hero-daily"><strong class="${st.daily < 0 ? 'neg' : ''}">${money(st.daily)}</strong> per day</div>
+          </div>
+        </div>
+        <div class="hero-caption ring-caption">${ringCaption}</div>
+        <div class="hero-stats hero-stats-2">
           <div class="hero-stat"><span>Income</span><strong>${money(st.income)}</strong></div>
           <div class="hero-stat"><span>Days left</span><strong>${st.daysLeft}</strong></div>
         </div>
@@ -413,16 +454,24 @@
 
       <h2 class="section-title"><span>Savings this month</span><button class="link" data-action="add" data-type="savings">Add</button></h2>
       <section class="card">
-        <div class="big-pair"><span class="big ${st.saved >= st.plan ? 'good' : ''}">${money(st.saved)}</span><span class="of">of ${money(st.plan)} plan</span></div>
-        ${bar(st.saved, st.plan, { variant: st.saved >= st.plan ? '' : 'violet', thick: true })}
-        <p class="note">${st.stillToSave > 0 ? `${money(st.stillToSave)} still to save this month.` : 'Savings plan met for this month.'}${st.extra > 0 ? ` Includes the extra 3rd paycheck (+${money(st.extra)}).` : ''}</p>
+        <div class="metric">
+          ${bar(st.saved, st.plan, { variant: st.saved >= st.plan ? '' : 'violet', thick: true })}
+          <div class="metric-body">
+            <div class="big-pair"><span class="big ${st.saved >= st.plan ? 'good' : ''}">${money(st.saved)}</span><span class="of">of ${money(st.plan)} plan</span></div>
+            <p class="note">${st.stillToSave > 0 ? `${money(st.stillToSave)} still to save this month.` : 'Savings plan met for this month.'}${st.extra > 0 ? ` Includes the extra 3rd paycheck (+${money(st.extra)}).` : ''}</p>
+          </div>
+        </div>
       </section>
 
       <h2 class="section-title"><span>Emergency fund</span><button class="link" data-action="tab" data-tab="goals">Goals</button></h2>
       <section class="card">
-        <div class="big-pair"><span class="big">${money(ef)}</span><span class="of">of ${money(efGoal)}</span></div>
-        ${bar(ef, efGoal, { variant: ef >= efGoal ? '' : 'violet', thick: true })}
-        <p class="note">${ef >= efGoal ? 'Fully funded.' : `${money(efGoal - ef)} to go.`} Total saved: ${money(total)}.</p>
+        <div class="metric">
+          ${bar(ef, efGoal, { variant: ef >= efGoal ? '' : 'violet', thick: true })}
+          <div class="metric-body">
+            <div class="big-pair"><span class="big">${money(ef)}</span><span class="of">of ${money(efGoal)}</span></div>
+            <p class="note">${ef >= efGoal ? 'Fully funded.' : `${money(efGoal - ef)} to go.`} Total saved: ${money(total)}.</p>
+          </div>
+        </div>
       </section>
 
       <h2 class="section-title"><span>Still due this month</span>${due.amount > 0 ? `<span>${money(due.amount)}</span>` : ''}</h2>
@@ -542,9 +591,13 @@
       else line = `<b>${money(gi.perMonth)}/mo</b> needed for ${gi.months} month${gi.months === 1 ? '' : 's'} · ${money(gi.left)} to go`;
       return `<button ${cardButton} data-action="edit-goal" data-id="${esc(g.id)}">
         <div class="card-head"><h3>${esc(g.name)}</h3><span class="meta">${g.date ? `by ${parseISO(g.date).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })}` : 'No date'}</span></div>
-        <div class="big-pair"><span class="big">${money(g.saved)}</span><span class="of">of ${money(g.target)} · ${Math.round(gi.progress)}%</span></div>
-        ${bar(g.saved, g.target, { variant: gi.done ? '' : 'violet', thick: true })}
-        <p class="note">${line}</p>
+        <div class="metric">
+          ${bar(g.saved, g.target, { variant: gi.done ? '' : 'violet', thick: true })}
+          <div class="metric-body">
+            <div class="big-pair"><span class="big">${money(g.saved)}</span><span class="of">of ${money(g.target)} · ${Math.round(gi.progress)}%</span></div>
+            <p class="note">${line}</p>
+          </div>
+        </div>
       </button>`;
     }).join('');
     const debts = state.debts.map((d) => {
@@ -566,11 +619,15 @@
     return `
       ${pageHead('', 'Goals', `Total saved ${money(total)}`, `<button class="head-btn" data-action="add-goal" aria-label="Add goal">${ICON.plus}</button>`)}
       <section class="hero">
-        <div class="hero-label">Emergency fund</div>
-        <div class="hero-amount" style="font-size:44px">${money(ef)}</div>
-        <div class="hero-caption">of ${money(efGoal)} goal · ${Math.round(pct(ef, efGoal))}%</div>
-        <div style="margin-top:14px">${bar(ef, efGoal, { variant: ef >= efGoal ? '' : 'violet', thick: true })}</div>
-        <div class="hero-caption" style="margin-top:10px">${ef >= efGoal ? `Fully funded${total > efGoal ? ` · ${money(total - efGoal)} extra saved` : ''}` : `${money(efGoal - ef)} to go · built from your total savings`}</div>
+        <div class="metric">
+          ${bar(ef, efGoal, { variant: ef >= efGoal ? '' : 'violet', thick: true })}
+          <div class="metric-body">
+            <div class="hero-label">Emergency fund</div>
+            <div class="hero-amount" style="font-size:40px">${money(ef)}</div>
+            <div class="hero-caption">of ${money(efGoal)} goal · ${Math.round(pct(ef, efGoal))}%</div>
+          </div>
+        </div>
+        <div class="hero-caption" style="margin-top:12px">${ef >= efGoal ? `Fully funded${total > efGoal ? ` · ${money(total - efGoal)} extra saved` : ''}` : `${money(efGoal - ef)} to go · built from your total savings`}</div>
       </section>
       <h2 class="section-title"><span>Goals</span><button class="link" data-action="add-goal">Add</button></h2>
       ${goals || '<div class="card empty"><strong>No custom goals yet</strong>Saving for something? Add a goal to see how much to put away each month.</div>'}
@@ -1000,7 +1057,7 @@
   function eraseAll(message) {
     if (!confirm(message)) return;
     if (!confirm('This can’t be undone. Erase everything?')) return;
-    for (const k of [DATA_KEY, PIN_KEY, FAIL_KEY, HIDDEN_KEY]) localStorage.removeItem(k);
+    for (const k of [DATA_KEY, LEGACY_DATA_KEY, PIN_KEY, FAIL_KEY, HIDDEN_KEY]) localStorage.removeItem(k);
     location.reload();
   }
 
@@ -1332,7 +1389,7 @@
   function boot() {
     load();
     bindEvents();
-    Lock.show(Lock.hasPin() ? 'unlock' : 'setup'); // always ask on open
+    Lock.show(Lock.hasPin() ? 'unlock' : 'setup'); // always ask on open; first visit sets a PIN
     if (!window.isSecureContext || !(window.crypto && crypto.subtle)) {
       Lock.message('Open this app over HTTPS to use the PIN lock.', true);
       Lock.busy = true;

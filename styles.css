@@ -63,7 +63,8 @@ body.privacy #app, body.privacy #sheet-root { filter: blur(18px); }
 .app { min-height: 100dvh; }
 .view {
   width: 100%; max-width: 440px; margin: 0 auto;
-  padding: calc(var(--safe-top) + 12px) calc(16px + var(--safe-right)) calc(var(--tabbar-h) + var(--safe-bottom) + 104px) calc(16px + var(--safe-left));
+  /* Extra bottom room so the last ring can scroll fully above the tab bar and the + button. */
+  padding: calc(var(--safe-top) + 12px) calc(16px + var(--safe-right)) calc(var(--tabbar-h) + var(--safe-bottom) + 148px) calc(16px + var(--safe-left));
   outline: none;
 }
 .view.enter { animation: fadeUp .22s ease-out; }
@@ -114,20 +115,46 @@ body.privacy #app, body.privacy #sheet-root { filter: blur(18px); }
 .hero-stat strong { display: block; font-size: 18px; font-weight: 700; margin-top: 2px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .hero-stat strong.neg { color: var(--bad); }
 
-/* ---------- Progress ---------- */
-.bar { height: 8px; border-radius: 4px; background: var(--track); overflow: hidden; }
-.bar > i { display: block; height: 100%; border-radius: 4px; background: var(--good); transition: width .4s ease; }
-.bar.over > i { background: var(--bad); }
-.bar.violet > i { background: linear-gradient(90deg, var(--magenta), var(--violet)); }
-.bar.thick { height: 12px; border-radius: 6px; }
-.bar.thick > i { border-radius: 6px; }
+/* ---------- Progress rings ---------- */
+svg.ring {
+  width: 48px; height: 48px; flex: none; display: block; overflow: visible;
+}
+svg.ring.thick { width: 72px; height: 72px; }
+svg.ring.lg { width: 220px; height: 220px; }
+svg.ring circle { fill: none; stroke-width: 3.6; }
+svg.ring.thick circle { stroke-width: 3.5; }
+svg.ring.lg circle { stroke-width: 2.35; }
+svg.ring .ring-track { stroke: var(--track); }
+svg.ring .ring-value { stroke: var(--good); transition: stroke-dasharray .4s ease; }
+svg.ring.over .ring-value { stroke: var(--bad); }
+svg.ring.violet .ring-value { stroke: var(--violet); }
+
+.hero-ring-wrap { position: relative; width: 220px; height: 220px; margin: 2px auto 8px; }
+.hero-ring-center {
+  position: absolute; inset: 32px; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; text-align: center; pointer-events: none;
+}
+.hero-circle .hero-amount { font-size: 40px; margin: 1px 0; }
+.hero-daily { font-size: 13px; font-weight: 600; color: rgba(237, 231, 246, .82); margin-top: 2px; }
+.hero-daily strong { font-weight: 700; font-variant-numeric: tabular-nums; }
+.hero-caption.ring-caption { text-align: center; margin-top: 2px; }
+.hero-stats-2 { grid-template-columns: 1fr 1fr; }
+
+.metric { display: flex; align-items: center; gap: 14px; }
+.metric-body { flex: 1; min-width: 0; }
+.metric .big-pair { margin-bottom: 0; }
+.metric .note { margin-top: 4px; }
+.hero .metric .hero-amount { margin: 2px 0; }
 
 .cat { padding: 12px 0; border-top: 1px solid var(--line); }
 .cat:first-of-type { border-top: 0; padding-top: 2px; }
-.cat-top { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; margin-bottom: 8px; }
+.cat-top { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+/* The fixed + button overlaps the right edge. Inset each ring so it stays fully visible. */
+.cat-top .ring { margin-right: 64px; }
+.cat-copy { min-width: 0; }
 .cat-name { font-weight: 600; font-size: 16px; }
-.cat-amt { font-size: 14px; color: var(--muted); font-variant-numeric: tabular-nums; }
-.cat-left { font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.cat-amt { font-size: 14px; color: var(--muted); font-variant-numeric: tabular-nums; margin-top: 1px; }
+.cat-left { font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; margin-top: 2px; }
 .cat button.cat-link { color: inherit; text-align: left; }
 
 .kv { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 7px 0; font-size: 16px; }
