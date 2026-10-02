@@ -1,7 +1,7 @@
 /* Budget — private budget PWA. Progress is drawn as rings.
-   budget.data.v2 is the on-device store. The first launch copies budget.data.v1
-   and keeps pay, bills, the savings plan, the emergency goal, saved amounts,
-   goal progress, and savings deposits. Spending transactions are dropped.
+   budget.data.v2 is the on-device store. Pay, bills, the savings plan, the
+   emergency goal, saved amounts, and savings deposits stay put.
+   Income is only the paychecks you add (amount and date). Nothing is assumed.
    All data lives in localStorage on this device. Nothing is ever sent anywhere. */
 'use strict';
 
@@ -24,6 +24,7 @@
       version: 1,
       createdAt: todayISO(),
       settings: { pay: 1166, firstPayday: '', savingsPlan: 1000, startingSavings: 0, emergencyGoal: 3000, lastExport: '' },
+      paychecks: [],
       bills: [
         { id: 'house', name: 'House bills', amount: 400, dueDay: null, fixed: true },
         { id: 'groceries', name: 'Groceries', amount: 300, dueDay: null, fixed: false },
@@ -91,7 +92,7 @@
   // State & persistence
   // ==========================================================================
   let state = defaultData();
-  const ui = { tab: 'home', activityMonth: currentYM(), unlocked: false, lastCategory: null };
+  const ui = { tab: 'start', activityMonth: currentYM(), unlocked: false, lastCategory: null };
 
   /** Coerce any stored or imported object into a valid data shape. */
   function normalize(raw) {
@@ -139,6 +140,15 @@
     const debts = objs(raw.debts);
     if (debts) {
       d.debts = debts.map((x) => ({ id: safeId(x.id), name: str(x.name, 60) || 'Debt', balance: numOrNull(x.balance), payment: num(x.payment) }));
+    }
+    const paychecks = objs(raw.paychecks);
+    if (paychecks) {
+      d.paychecks = paychecks
+        .filter((p) => isISODate(p.date) && Number.isFinite(Number(p.amount)) && Number(p.amount) > 0)
+        .map((p) => ({
+          id: safeId(p.id), amount: r2(Number(p.amount)), date: p.date,
+          note: str(p.note, 80), created: num(p.created, Date.now()),
+        }));
     }
     const txs = objs(raw.transactions);
     if (txs) {
@@ -202,7 +212,12 @@
     }
     return out;
   }
-  const paychecksIn = (ym) => { const days = paydaysIn(ym); return days ? days.length : 2; };
+  /** Paychecks logged in a month, oldest first. These are the only income. */
+  function monthPaychecks(ym) {
+    return state.paychecks
+      .filter((p) => p.date.startsWith(ym))
+      .sort((a, b) => a.date.localeCompare(b.date) || (a.created || 0) - (b.created || 0));
+  }
 
   function subsTotals() {
     let monthly = 0, yearly = 0, cancelMonthly = 0, cancelYearly = 0;
@@ -237,10 +252,13 @@
 
   /** Everything the Home screen and History need for one month. */
   function monthStats(ym) {
-    const { pay, savingsPlan } = state.settings;
-    const checks = paychecksIn(ym);
-    const income = r2(checks * pay);
-    const extra = r2(Math.max(0, checks - 2) * pay);
+    const { savingsPlan } = state.settings;
+    const logged = monthPaychecks(ym);
+    const checks = logged.length;
+    // Usual pay in Settings is only the default for a new paycheck. Saved amounts count.
+    const income = sumBy(logged, (p) => p.amount);
+    // A 3rd paycheck (and any after it) is extra and is added to that month's savings plan.
+    const extra = sumBy(logged.slice(2), (p) => p.amount);
     const plan = r2(savingsPlan + extra);
     const txs = monthTx(ym);
     const purchases = txs.filter((t) => t.type === 'purchase');
@@ -345,9 +363,16 @@
   }
 
   function historyMonths() {
-    const end = currentYM();
+    let end = currentYM();
     let start = state.createdAt.slice(0, 7);
-    for (const t of state.transactions) if (t.date.slice(0, 7) < start) start = t.date.slice(0, 7);
+    const dates = [
+      ...state.transactions.map((t) => t.date.slice(0, 7)),
+      ...state.paychecks.map((p) => p.date.slice(0, 7)),
+    ];
+    for (const ym of dates) {
+      if (ym < start) start = ym;
+      if (ym > end) end = ym;
+    }
     if (start > end) start = end;
     const out = [];
     for (let ym = end; ym >= start && out.length < 600; ym = addMonths(ym, -1)) out.push(ym);
@@ -380,7 +405,10 @@
   }
 
   function pageHead(eyebrow, title, sub = '', action = '') {
-    return `<header class="page-head"><div>${eyebrow ? `<div class="eyebrow">${esc(eyebrow)}</div>` : ''}<h1>${esc(title)}</h1>${sub ? `<div class="sub">${sub}</div>` : ''}</div>${action}</header>`;
+    return `<header class="page-head">
+      <button type="button" class="back-start" data-action="tab" data-tab="start">${ICON.left}<span>Start</span></button>
+      <div class="page-head-main"><div>${eyebrow ? `<div class="eyebrow">${esc(eyebrow)}</div>` : ''}<h1>${esc(title)}</h1>${sub ? `<div class="sub">${sub}</div>` : ''}</div>${action}</div>
+    </header>`;
   }
 
   function catRow(c) {
@@ -414,7 +442,11 @@
     const cats = st.cats.filter((c) => c.id !== 'other' || c.spent > 0);
     const overall = cents(st.spent) > cents(st.budgetTotal);
     const paydays = paydaysIn(ym);
-    const sub = `${st.daysLeft} day${st.daysLeft === 1 ? '' : 's'} left · ${st.checks} paychecks${paydays ? ` (${paydays.map((d) => shortDate(toISO(d))).join(', ')})` : ''}`;
+    const paycheckLine = st.checks === 0
+      ? 'No paycheck yet'
+      : `${st.checks} paycheck${st.checks === 1 ? '' : 's'} added`;
+    const schedule = paydays ? ` · paydays ${paydays.map((d) => shortDate(toISO(d))).join(', ')}` : '';
+    const sub = `${st.daysLeft} day${st.daysLeft === 1 ? '' : 's'} left · ${paycheckLine}${schedule}`;
 
     let dueHTML;
     if (!due.hasDueDays && !due.items.length) {
@@ -428,29 +460,46 @@
 
     const budgetLeft = r2(st.budgetTotal - st.spent);
     const budgetLeftPct = pct(Math.max(0, budgetLeft), st.budgetTotal);
-    const ringCaption = overall
-      ? `Over this month’s budget by ${money(st.spent - st.budgetTotal)}`
-      : `${Math.round(budgetLeftPct)}% of this month’s budget still left`;
+    const waiting = st.checks === 0;
+    const shownLeft = waiting ? 0 : st.flexible;
+    const shownDaily = waiting ? 0 : st.daily;
+    const ringCaption = waiting
+      ? 'Add a paycheck when you get paid. Nothing is counted yet.'
+      : overall
+        ? `Over this month’s budget by ${money(st.spent - st.budgetTotal)}`
+        : `${Math.round(budgetLeftPct)}% of this month’s budget still left`;
+    const payList = monthPaychecks(ym);
+    const payHTML = payList.length
+      ? `<div class="list">${payList.map((p) => `
+          <button class="row" data-action="edit-paycheck" data-id="${esc(p.id)}">
+            <span class="row-main"><span class="row-title">${esc(p.note || 'Paycheck')}</span><span class="row-sub">${shortDate(p.date)}</span></span>
+            <span class="row-end"><span class="amt good">+${money(p.amount)}</span></span>${ICON.chev}
+          </button>`).join('')}</div>`
+      : '<div class="card empty"><strong>No paycheck yet</strong>Money on hand starts at $0. Add a paycheck when you get paid.</div>';
     return `
-      ${pageHead('Circle view', monthLabel(ym, { month: 'long' }), esc(sub))}
+      ${pageHead('', monthLabel(ym, { month: 'long' }), esc(sub))}
       <section class="hero hero-circle" aria-label="Left to spend">
         <div class="hero-ring-wrap">
           ${bar(overall ? st.budgetTotal : Math.max(0, budgetLeft), st.budgetTotal || 1, { over: overall, large: true })}
           <div class="hero-ring-center">
             <div class="hero-label">Left to spend</div>
-            <div class="hero-amount ${st.flexible < 0 ? 'neg' : ''}" id="left-to-spend">${money(st.flexible)}</div>
-            <div class="hero-daily"><strong class="${st.daily < 0 ? 'neg' : ''}">${money(st.daily)}</strong> per day</div>
+            <div class="hero-amount ${shownLeft < 0 ? 'neg' : ''}" id="left-to-spend">${money(shownLeft)}</div>
+            <div class="hero-daily"><strong class="${shownDaily < 0 ? 'neg' : ''}">${money(shownDaily)}</strong> per day</div>
           </div>
         </div>
         <div class="hero-caption ring-caption">${ringCaption}</div>
         <div class="hero-stats hero-stats-2">
-          <div class="hero-stat"><span>Income</span><strong>${money(st.income)}</strong></div>
+          <div class="hero-stat"><span>Paychecks</span><strong>${money(st.income)}</strong></div>
           <div class="hero-stat"><span>Days left</span><strong>${st.daysLeft}</strong></div>
         </div>
       </section>
 
+      <h2 class="section-title"><span>Paychecks</span><button class="link" data-action="add-paycheck">Add</button></h2>
+      ${payHTML}
+
       <h2 class="section-title"><span>Budget</span><span class="${overall ? 'bad' : 'good'}">${money(st.spent)} of ${money(st.budgetTotal)}</span></h2>
       <section class="card">${cats.map(catRow).join('')}</section>
+      <button class="btn" data-action="add" data-type="purchase">${ICON.plus} Add purchase</button>
 
       <h2 class="section-title"><span>Savings this month</span><button class="link" data-action="add" data-type="savings">Add</button></h2>
       <section class="card">
@@ -479,14 +528,14 @@
 
       <h2 class="section-title"><span>How it adds up</span></h2>
       <section class="card">
-        <div class="kv"><span class="k">Income</span><span class="v">${money(st.income)}</span></div>
+        <div class="kv"><span class="k">Paychecks</span><span class="v">${money(st.income)}</span></div>
         <div class="kv"><span class="k">Spent so far</span><span class="v">−${money(st.spent)}</span></div>
         <div class="kv"><span class="k">Saved so far</span><span class="v">−${money(st.saved)}</span></div>
         <div class="kv total"><span class="k">Left this month</span><span class="v ${st.left < 0 ? 'bad' : ''}">${money(st.left)}</span></div>
         <div class="kv"><span class="k">Savings still to go</span><span class="v">−${money(st.stillToSave)}</span></div>
         <div class="kv"><span class="k">Fixed bills not paid yet</span><span class="v">−${money(st.unpaidFixed)}</span></div>
         <div class="kv total"><span class="k">Left to spend</span><span class="v ${st.flexible < 0 ? 'bad' : 'good'}">${money(st.flexible)}</span></div>
-        <p class="note">Cushion after the full plan (income − all budgets − savings plan): <b class="${st.cushion < 0 ? 'bad' : 'good'}">${money(st.cushion)}</b></p>
+        <p class="note">Room left if every bill and the savings plan are fully used: <b class="${st.cushion < 0 ? 'bad' : 'good'}">${money(st.cushion)}</b>. Only paychecks you add count as money in.</p>
       </section>`;
   }
 
@@ -509,14 +558,18 @@
 
   function viewActivity() {
     const ym = ui.activityMonth;
-    const latest = state.transactions.reduce((mx, t) => (t.date.slice(0, 7) > mx ? t.date.slice(0, 7) : mx), currentYM());
+    const latest = [...state.transactions.map((t) => t.date.slice(0, 7)), ...state.paychecks.map((p) => p.date.slice(0, 7))]
+      .reduce((mx, ym) => (ym > mx ? ym : mx), currentYM());
     const earliest = historyMonths().at(-1);
     const st = monthStats(ym);
-    const txs = monthTx(ym).sort((a, b) => b.date.localeCompare(a.date) || b.created - a.created);
+    const events = [
+      ...monthTx(ym).map((t) => ({ date: t.date, created: t.created || 0, html: txRow(t) })),
+      ...monthPaychecks(ym).map((p) => ({ date: p.date, created: p.created || 0, html: paycheckRow(p) })),
+    ].sort((a, b) => b.date.localeCompare(a.date) || b.created - a.created);
     const groups = [];
-    for (const t of txs) {
+    for (const ev of events) {
       const g = groups.at(-1);
-      if (g && g.date === t.date) g.items.push(t); else groups.push({ date: t.date, items: [t] });
+      if (g && g.date === ev.date) g.items.push(ev); else groups.push({ date: ev.date, items: [ev] });
     }
     const dayTitle = (iso) => {
       if (iso === todayISO()) return 'Today';
@@ -525,7 +578,7 @@
       return parseISO(iso).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
     };
     return `
-      ${pageHead('', 'Activity', `${st.count} transaction${st.count === 1 ? '' : 's'}`)}
+      ${pageHead('', 'Activity', `${events.length} item${events.length === 1 ? '' : 's'}`)}
       <div class="month-switch">
         <button class="arrow" data-action="month-step" data-step="-1" aria-label="Previous month" ${ym <= earliest ? 'disabled' : ''}>${ICON.left}</button>
         <label class="month-label">${esc(monthLabel(ym))}<input type="month" id="month-pick" value="${ym}" max="${latest}" aria-label="Pick a month"></label>
@@ -537,8 +590,9 @@
         <div class="chip-stat"><span>Left over</span><strong class="${st.left < 0 ? 'bad' : ''}">${money(st.left)}</strong></div>
       </div>
       ${groups.length
-        ? groups.map((g) => `<div class="day-label">${esc(dayTitle(g.date))}</div><div class="list">${g.items.map(txRow).join('')}</div>`).join('')
-        : `<div class="card empty" style="margin-top:12px"><strong>No activity in ${esc(monthLabel(ym, { month: 'long' }))}</strong>Tap + to add a purchase or savings.</div>`}`;
+        ? groups.map((g) => `<div class="day-label">${esc(dayTitle(g.date))}</div><div class="list">${g.items.map((ev) => ev.html).join('')}</div>`).join('')
+        : `<div class="card empty" style="margin-top:12px"><strong>Nothing in ${esc(monthLabel(ym, { month: 'long' }))}</strong>Add a paycheck, a purchase, or savings from Start.</div>`}
+      <button class="btn" data-action="add" data-type="purchase" style="margin-top:12px">${ICON.plus} Add purchase</button>`;
   }
 
   function viewSubs() {
@@ -637,13 +691,14 @@
   }
 
   function paydayHint() {
+    const usual = `Usual paycheck is ${money(state.settings.pay)}. A new paycheck starts there. The amount you save on it is what counts.`;
     const ym = currentYM();
     const days = paydaysIn(ym);
-    if (!days) return 'Optional. Blank means every month counts as 2 paychecks.';
+    if (!days) return `${usual} Add each paycheck when you get it. Nothing is added for you.`;
     const next = addMonths(ym, 1);
     const nd = paydaysIn(next);
     const list = (arr) => arr.map((d) => shortDate(toISO(d))).join(', ');
-    return `${monthLabel(ym, { month: 'long' })}: ${days.length} paychecks (${list(days)}). ${monthLabel(next, { month: 'long' })}: ${nd.length} (${list(nd)}).`;
+    return `${usual} Payday dates — ${monthLabel(ym, { month: 'long' })}: ${list(days)}. ${monthLabel(next, { month: 'long' })}: ${list(nd)}.`;
   }
 
   function viewSettings() {
@@ -664,12 +719,13 @@
       ${pageHead('', 'Settings', 'Everything stays on this iPhone')}
       <h2 class="section-title"><span>Income</span></h2>
       <div class="list">
-        ${moneyInput('pay', 'Pay per check')}
+        ${moneyInput('pay', 'Usual paycheck')}
         <div class="row"><span class="label">How often</span><span class="muted">Every 2 weeks</span></div>
         <label class="row"><span class="label">First payday</span>
           <input class="inline" data-setting="firstPayday" type="date" value="${esc(s.firstPayday)}" aria-label="First payday (optional)"></label>
       </div>
       <p class="note" id="payday-hint" style="margin:-4px 4px 0">${esc(paydayHint())}</p>
+      <button class="btn" data-action="add-paycheck" style="margin-top:12px">${ICON.plus} Add paycheck</button>
 
       <h2 class="section-title"><span>Bills</span><button class="link" data-action="add-bill">Add</button></h2>
       <div class="list">${bills || '<div class="empty">No bills</div>'}</div>
@@ -682,7 +738,7 @@
         ${moneyInput('emergencyGoal', 'Emergency fund goal')}
         <button class="row accent" data-action="tab" data-tab="goals"><span class="row-main"><span class="row-title">Custom goals &amp; debts</span></span>${ICON.chev}</button>
       </div>
-      <p class="note" style="margin:-4px 4px 0">A month with a 3rd paycheck adds that paycheck to the month’s savings plan.</p>
+      <p class="note" style="margin:-4px 4px 0">If you log a 3rd paycheck in a month, that extra check is added to the month’s savings plan.</p>
 
       <h2 class="section-title"><span>History</span></h2>
       <div class="list">
@@ -711,7 +767,46 @@
       <p class="note" style="margin:-4px 4px 16px;text-align:center">Works offline. No accounts, no tracking. Nothing leaves this device.</p>`;
   }
 
-  const VIEWS = { home: viewHome, activity: viewActivity, subs: viewSubs, goals: viewGoals, settings: viewSettings };
+  function paycheckRow(p) {
+    return `<button class="row" data-action="edit-paycheck" data-id="${esc(p.id)}">
+      <span class="dot" style="background:#7E57C2">$</span>
+      <span class="row-main"><span class="row-title">${esc(p.note || 'Paycheck')}</span><span class="row-sub">Paycheck · ${shortDate(p.date)}</span></span>
+      <span class="row-end"><span class="amt good">+${money(p.amount)}</span></span>${ICON.chev}
+    </button>`;
+  }
+
+  function viewStart() {
+    const tiles = [
+      { tab: 'home', title: 'Home', sub: 'Circle budget', wide: true },
+      { action: 'add-paycheck', title: 'Add paycheck' },
+      { action: 'add', type: 'purchase', title: 'Add purchase' },
+      { action: 'add', type: 'savings', title: 'Add savings' },
+      { tab: 'activity', title: 'Activity' },
+      { tab: 'subs', title: 'Subscriptions' },
+      { tab: 'goals', title: 'Goals' },
+      { tab: 'settings', title: 'Settings' },
+    ];
+    return `
+      <div class="start-screen">
+        <header class="start-head">
+          <h1>Start</h1>
+          <p>Tap a tile</p>
+        </header>
+        <div class="start-grid">
+          ${tiles.map((t) => {
+            const attrs = t.tab
+              ? `data-action="tab" data-tab="${t.tab}"`
+              : `data-action="${t.action}"${t.type ? ` data-type="${t.type}"` : ''}`;
+            return `<button type="button" class="start-tile${t.wide ? ' wide' : ''}" ${attrs}>
+              <span class="start-title">${esc(t.title)}</span>
+              ${t.sub ? `<span class="start-sub">${esc(t.sub)}</span>` : ''}
+            </button>`;
+          }).join('')}
+        </div>
+      </div>`;
+  }
+
+  const VIEWS = { start: viewStart, home: viewHome, activity: viewActivity, subs: viewSubs, goals: viewGoals, settings: viewSettings };
 
   function render(animate = false) {
     if (!ui.unlocked) return;
@@ -722,6 +817,7 @@
       t.classList.toggle('active', on);
       if (on) t.setAttribute('aria-current', 'page'); else t.removeAttribute('aria-current');
     }
+    document.body.classList.toggle('on-start', ui.tab === 'start');
     $('#fab').hidden = !(ui.tab === 'home' || ui.tab === 'activity');
     if (animate) {
       view.classList.remove('enter');
@@ -850,6 +946,47 @@
         if (editing) toast('Saved');
         else if (kind === 'purchase') toast(`Added ${money(amount)} · ${categoryOf(category).name}`);
         else toast(`${signed < 0 ? 'Withdrew' : 'Saved'} ${money(amount)}`);
+        return true;
+      },
+    });
+  }
+
+  function openPaycheckSheet(item) {
+    const editing = !!item;
+    const usual = state.settings.pay;
+    openSheet({
+      title: editing ? 'Edit paycheck' : 'Add paycheck',
+      saveLabel: editing ? 'Save' : 'Add',
+      body: `
+        <div class="amount-field"><span>$</span><input name="amount" ${moneyAttr} placeholder="0.00" aria-label="Paycheck amount" value="${esc(money(editing ? item.amount : usual))}"></div>
+        <p class="field-hint">Starts at your usual paycheck (${money(usual)}). Change it if this check was more or less.</p>
+        <div class="field-list">
+          ${field('Date', `<input name="date" type="date" required value="${esc(item?.date || todayISO())}">`)}
+          ${field('Note', `<input name="note" type="text" maxlength="80" placeholder="Optional" autocomplete="off" enterkeyhint="done" value="${esc(item?.note || '')}">`)}
+        </div>
+        <div class="form-error" role="alert"></div>
+        ${editing ? '<button type="button" class="btn danger" data-del>Delete paycheck</button>' : ''}`,
+      onMount: (el) => {
+        fitAmount(el.querySelector('[name="amount"]'));
+        const del = el.querySelector('[data-del]');
+        if (del) del.addEventListener('click', () => {
+          if (!confirm('Delete this paycheck?')) return;
+          state.paychecks = state.paychecks.filter((p) => p.id !== item.id);
+          commit(); closeSheet(); toast('Paycheck deleted');
+        });
+        if (!editing) el.querySelector('[name="amount"]').focus({ preventScroll: true });
+      },
+      onSave: (el) => {
+        const amount = parseMoney(valueOf(el, 'amount'));
+        const date = valueOf(el, 'date');
+        if (amount == null || amount <= 0) return formError(el, 'Enter the paycheck amount.');
+        if (amount >= 1e7) return formError(el, 'That amount looks too large.');
+        if (!isISODate(date)) return formError(el, 'Pick the date you got paid.');
+        const record = { amount, date, note: valueOf(el, 'note').slice(0, 80) };
+        if (editing) Object.assign(item, record);
+        else state.paychecks.push({ id: uid(), created: Date.now(), ...record });
+        commit();
+        toast(editing ? 'Paycheck saved' : `Added paycheck ${money(amount)}`);
         return true;
       },
     });
@@ -988,7 +1125,7 @@
         <div class="hist-top"><strong>${esc(monthLabel(ym))}${ym === currentYM() ? ' <span class="badge due">Now</span>' : ''}</strong>
           <span class="${st.left < 0 ? 'bad' : 'good'}" style="font-weight:700">${money(st.left)} <span class="muted" style="font-weight:400;font-size:13px">left over</span></span></div>
         <div class="hist-grid">
-          <div><span>Income</span><b>${money(st.income)}</b></div>
+          <div><span>Paychecks</span><b>${money(st.income)}</b></div>
           <div><span>Spent</span><b>${money(st.spent)}</b></div>
           <div><span>Saved</span><b>${money(st.saved)}</b></div>
           <div><span>Total saved</span><b>${money(savingsThrough(ym))}</b></div>
@@ -997,7 +1134,7 @@
     }).join('');
     openSheet({
       title: 'History', tall: true,
-      body: `<p class="field-hint" style="margin:0 4px 10px">Left over = income − spent − saved. Tap a month to see its activity.</p><div class="list">${rows}</div>`,
+      body: `<p class="field-hint" style="margin:0 4px 10px">Left over = paychecks − spent − saved. Tap a month to see it.</p><div class="list">${rows}</div>`,
     });
   }
 
@@ -1228,10 +1365,10 @@
           await this.setPin(pin);
           this.setFails({ count: 0, until: 0 });
           this.hide();
-          if (initial) { onUnlocked(); toast('PIN set'); } else toast('PIN changed');
+          if (initial) { ui.tab = 'start'; onUnlocked(); toast('PIN set'); } else toast('PIN changed');
         } else if (await this.verify(pin)) {
           this.setFails({ count: 0, until: 0 });
-          if (this.mode === 'unlock') { this.hide(); onUnlocked(); } else this.show('change-new');
+          if (this.mode === 'unlock') { this.hide(); ui.tab = 'start'; onUnlocked(); } else this.show('change-new');
         } else {
           const f = this.fails();
           f.count += 1;
@@ -1249,7 +1386,8 @@
 
   let hiddenAt = 0;
   function onUnlocked() {
-    if (!ui.unlocked) { ui.unlocked = true; ui.tab = 'home'; }
+    if (!ui.unlocked) ui.tab = 'start';
+    ui.unlocked = true;
     $('#app').hidden = false;
     render(true);
   }
@@ -1291,6 +1429,8 @@
     switch (el.dataset.action) {
       case 'tab': goTab(el.dataset.tab); break;
       case 'add': openTxSheet(null, el.dataset.type || 'purchase'); break;
+      case 'add-paycheck': openPaycheckSheet(null); break;
+      case 'edit-paycheck': openPaycheckSheet(state.paychecks.find((p) => p.id === id)); break;
       case 'edit-tx': { const tx = find('transactions'); if (tx) openTxSheet(tx); break; }
       case 'month-step': ui.activityMonth = addMonths(ui.activityMonth, Number(el.dataset.step)); render(); break;
       case 'add-sub': openSubSheet(null); break;

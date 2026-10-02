@@ -3,7 +3,7 @@
    handled; the app never makes any other network calls. */
 'use strict';
 
-const CACHE = 'budget-v3';
+const CACHE = 'budget-v4';
 const SHELL = [
   './',
   './index.html',
