@@ -2,6 +2,8 @@
    budget.data.v2 is the on-device store. Pay, bills, the savings plan, the
    emergency goal, saved amounts, and savings deposits stay put.
    Income is only the paychecks you add (amount and date). Nothing is assumed.
+   "Left to spend" = paychecks − spent − moved to savings. Bills and savings still planned are shown
+   on their own, never subtracted into a negative. Savings entries can go to the emergency fund or a goal.
    All data lives in localStorage on this device. Nothing is ever sent anywhere. */
 'use strict';
 
@@ -53,14 +55,19 @@
   const sumBy = (arr, fn) => arr.reduce((acc, x) => acc + cents(fn(x)), 0) / 100;
   const pct = (part, whole) => (whole > 0 ? Math.max(0, Math.min(100, (part / whole) * 100)) : (part > 0 ? 100 : 0));
 
-  const fmt0 = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
-  const fmt2 = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 });
-  /** $1,166 for whole dollars, $12.50 otherwise. Never shows "-$0". */
+  const fmt2 = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const num2 = new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  /** Always two decimals: $1,166.00, $12.50. Never shows "-$0.00" or NaN. */
   function money(n) {
     let v = r2(n);
-    if (v === 0) v = 0;
-    return (Number.isInteger(v) ? fmt0 : fmt2).format(v);
+    if (!Number.isFinite(v) || v === 0) v = 0;
+    return fmt2.format(v);
   }
+  /** "−$12.50" for money going out; plain "$0.00" when there's nothing. */
+  const minus = (n) => (cents(n) === 0 ? money(0) : `−${money(Math.abs(n))}`);
+  const plusMoney = (n) => (cents(n) === 0 ? money(0) : `+${money(Math.abs(n))}`);
+  /** Number for an input box next to a "$" sign: 1,166.00 (no $). */
+  const amountStr = (n) => num2.format(Math.abs(r2(n)) || 0);
   /** Parse "$1,234.50" / "12" into a number, or null if it isn't one. */
   function parseMoney(str) {
     const cleaned = String(str ?? '').replace(/[^0-9.\-]/g, '');
@@ -157,6 +164,10 @@
         .map((t) => ({
           id: safeId(t.id), type: t.type === 'savings' ? 'savings' : 'purchase', amount: r2(Number(t.amount)),
           category: str(t.category, 64) || 'other', note: str(t.note, 120), date: t.date, created: num(t.created, Date.now()),
+          // Savings only: which goal it went to. Blank = emergency fund (every older entry).
+          goal: t.type === 'savings' ? str(t.goal, 64) : '',
+          // Savings only: 'had' = money he already had saved (counts toward the goal, not this month's pay or plan).
+          src: t.type === 'savings' && t.src === 'had' ? 'had' : '',
         }));
     }
     return d;
@@ -244,10 +255,19 @@
   }
 
   const monthTx = (ym) => state.transactions.filter((t) => t.date.startsWith(ym));
-  const totalSavings = () => r2(state.settings.startingSavings + sumBy(state.transactions.filter((t) => t.type === 'savings'), (t) => t.amount));
+  const savingsTx = () => state.transactions.filter((t) => t.type === 'savings');
+  /** Goal id a savings entry counts toward; '' = emergency fund (also if its goal was removed). */
+  const goalIdOf = (t) => (t.goal && state.goals.some((g) => g.id === t.goal) ? t.goal : '');
+  /** Emergency fund = starting savings + every savings entry not put toward a custom goal. */
+  const efSaved = () => r2(state.settings.startingSavings + sumBy(savingsTx().filter((t) => !goalIdOf(t)), (t) => t.amount));
+  /** A custom goal = its starting amount + savings added to it. */
+  const goalSaved = (g) => r2(g.saved + sumBy(savingsTx().filter((t) => t.goal === g.id), (t) => t.amount));
+  const goalName = (id) => (id ? state.goals.find((g) => g.id === id)?.name : '') || 'Emergency fund';
+  /** Everything saved: the emergency fund plus every goal. */
+  const totalSavings = () => r2(efSaved() + sumBy(state.goals, goalSaved));
   function savingsThrough(ym) {
-    return r2(state.settings.startingSavings +
-      sumBy(state.transactions.filter((t) => t.type === 'savings' && t.date.slice(0, 7) <= ym), (t) => t.amount));
+    return r2(state.settings.startingSavings + sumBy(state.goals, (g) => g.saved) +
+      sumBy(savingsTx().filter((t) => t.date.slice(0, 7) <= ym), (t) => t.amount));
   }
 
   /** Everything the Home screen and History need for one month. */
@@ -262,7 +282,8 @@
     const plan = r2(savingsPlan + extra);
     const txs = monthTx(ym);
     const purchases = txs.filter((t) => t.type === 'purchase');
-    const saved = sumBy(txs.filter((t) => t.type === 'savings'), (t) => t.amount);
+    // Savings moved out of this month's pay. "Already had it" entries grow a goal but don't touch this month.
+    const saved = sumBy(txs.filter((t) => t.type === 'savings' && t.src !== 'had'), (t) => t.amount);
     const spent = sumBy(purchases, (t) => t.amount);
 
     const cats = categories().map((c) => ({ ...c, spent: 0 }));
@@ -273,21 +294,30 @@
     }
     const budgetTotal = sumBy(cats, (c) => c.budget);
 
-    // Same definitions as the old spreadsheet:
-    // Left = income − spent − saved. Flexible ("Left to spend") = Left − savings still to go − unpaid fixed bills.
+    // Money on hand ("Left to spend") = paychecks logged − money actually spent − money moved to savings.
+    // It only goes below $0 if more went out than the paychecks brought in.
     const left = r2(income - spent - saved);
+    // Still planned this month, shown on its own (never subtracted into a scary negative):
     const stillToSave = r2(Math.max(0, plan - saved));
     const unpaidFixed = sumBy(cats.filter((c) => c.fixed), (c) => Math.max(0, c.budget - c.spent));
-    const flexible = r2(left - stillToSave - unpaidFixed);
+    const planned = r2(stillToSave + unpaidFixed);
+    // What's free once the planned bills and savings are covered. If negative, it's "still needed", not money gone.
+    const free = r2(left - planned);
+    const needed = r2(Math.max(0, -free));
+    // Categories that really went past their budget (a $0 budget like "Other" has no limit to go over).
+    const overCats = cats.filter((c) => c.budget > 0 && cents(c.spent) > cents(c.budget));
 
     const [y, m] = ymParts(ym);
     const dim = daysInMonth(y, m);
     const cur = currentYM();
     const daysLeft = ym === cur ? dim - new Date().getDate() + 1 : (ym < cur ? 0 : dim); // includes today
-    const daily = r2(flexible / Math.max(1, daysLeft));
-    const cushion = r2(income - budgetTotal - plan);
+    const daily = r2(Math.max(0, free) / Math.max(1, daysLeft));
+    // Paychecks still expected this month (schedule if set, otherwise 2 a month). Only used for wording, never counted as money.
+    const pd = paydaysIn(ym);
+    const expected = pd ? pd.length : 2;
+    const checksToCome = ym === cur ? Math.max(0, expected - checks) : 0;
 
-    return { ym, checks, income, extra, plan, saved, spent, cats, budgetTotal, left, stillToSave, unpaidFixed, flexible, daysLeft, daily, cushion, count: txs.length };
+    return { ym, checks, income, extra, plan, saved, spent, cats, budgetTotal, left, stillToSave, unpaidFixed, planned, free, needed, overCats, daysLeft, daily, checksToCome, count: txs.length };
   }
 
   /** Day of month a subscription renews in (y, m), or null if it doesn't renew that month. */
@@ -342,7 +372,8 @@
   }
 
   function goalInfo(g) {
-    const left = r2(Math.max(0, g.target - g.saved));
+    const saved = goalSaved(g);
+    const left = r2(Math.max(0, g.target - saved));
     let months = null, perMonth = null, passed = false;
     if (g.date) {
       const [ty, tm] = ymParts(g.date.slice(0, 7));
@@ -351,7 +382,7 @@
       months = Math.max(1, (ty - cy) * 12 + (tm - cm));
       perMonth = r2(left / months);
     }
-    return { left, months, perMonth, passed, done: g.target > 0 && g.saved >= g.target, progress: pct(g.saved, g.target) };
+    return { saved, left, months, perMonth, passed, done: g.target > 0 && saved >= g.target, progress: pct(saved, g.target) };
   }
 
   function debtInfo(d) {
@@ -412,15 +443,16 @@
   }
 
   function catRow(c) {
-    const over = cents(c.spent) > cents(c.budget);
+    const noBudget = !(c.budget > 0);
+    const over = !noBudget && cents(c.spent) > cents(c.budget);
     const left = r2(c.budget - c.spent);
     const attrs = c.id === 'subs' ? 'data-action="tab" data-tab="subs" role="button" tabindex="0"' : '';
     return `<div class="cat" ${attrs}>
       <div class="cat-top">
         <div class="cat-copy">
           <div class="cat-name">${esc(c.name)}</div>
-          <div class="cat-amt">${money(c.spent)} of ${money(c.budget)}</div>
-          <div class="cat-left ${over ? 'bad' : 'good'}">${over ? `${money(-left)} over` : `${money(left)} left`}</div>
+          <div class="cat-amt">${noBudget ? `${money(c.spent)} spent` : `${money(c.spent)} of ${money(c.budget)}`}</div>
+          <div class="cat-left ${over ? 'bad' : noBudget ? 'muted' : 'good'}">${noBudget ? 'No set budget' : over ? `${money(-left)} over` : `${money(left)} left`}</div>
         </div>
         ${bar(c.spent, c.budget, { over })}
       </div>
@@ -432,20 +464,33 @@
   // ==========================================================================
   // Screens
   // ==========================================================================
+  /** One plain sentence about planned bills/savings vs. money on hand. Never a scary negative. */
+  function planLine(st) {
+    if (st.left < 0) return `<span class="bad">You’ve spent and saved ${money(-st.left)} more than the paychecks you’ve added.</span>`;
+    if (st.planned <= 0) return st.free > 0 ? `Bills and savings are covered. ${money(st.free)} is free to spend.` : 'Bills and savings are covered.';
+    if (st.free >= 0) return `${money(st.free)} free after the bills and savings still planned.`;
+    if (st.checksToCome > 0) return `Bills and savings still planned are ${money(st.planned)}. Your next paycheck covers the other ${money(st.needed)}.`;
+    return `Bills and savings still planned are ${money(st.needed)} more than you have this month.`;
+  }
+  function overLine(st) {
+    if (!st.overCats.length) return '';
+    return `Over budget: ${st.overCats.map((c) => `${esc(c.name)} by ${money(c.spent - c.budget)}`).join(', ')}.`;
+  }
+
   function viewHome() {
     const ym = currentYM();
     const st = monthStats(ym);
     const due = dueThisMonth(st);
     const efGoal = state.settings.emergencyGoal;
-    const total = totalSavings();
-    const ef = Math.min(total, efGoal);
+    const efTotal = efSaved();
+    const ef = Math.max(0, Math.min(efTotal, efGoal));
     const cats = st.cats.filter((c) => c.id !== 'other' || c.spent > 0);
-    const overall = cents(st.spent) > cents(st.budgetTotal);
+    const overall = st.budgetTotal > 0 && cents(st.spent) > cents(st.budgetTotal);
     const paydays = paydaysIn(ym);
     const paycheckLine = st.checks === 0
       ? 'No paycheck yet'
       : `${st.checks} paycheck${st.checks === 1 ? '' : 's'} added`;
-    const schedule = paydays ? ` · paydays ${paydays.map((d) => shortDate(toISO(d))).join(', ')}` : '';
+    const schedule = paydays && paydays.length ? ` · paydays ${paydays.map((d) => shortDate(toISO(d))).join(', ')}` : '';
     const sub = `${st.daysLeft} day${st.daysLeft === 1 ? '' : 's'} left · ${paycheckLine}${schedule}`;
 
     let dueHTML;
@@ -460,38 +505,48 @@
 
     const budgetLeft = r2(st.budgetTotal - st.spent);
     const budgetLeftPct = pct(Math.max(0, budgetLeft), st.budgetTotal);
-    const waiting = st.checks === 0;
-    const shownLeft = waiting ? 0 : st.flexible;
-    const shownDaily = waiting ? 0 : st.daily;
+    const waiting = st.checks === 0 && st.count === 0;
+    const overspent = st.left < 0;
+    const centerSmall = waiting
+      ? 'Add a paycheck'
+      : overspent
+        ? 'more than paychecks'
+        : st.free > 0
+          ? `<strong>${money(st.daily)}</strong> a day free`
+          : 'before bills &amp; savings';
     const ringCaption = waiting
       ? 'Add a paycheck when you get paid. Nothing is counted yet.'
       : overall
-        ? `Over this month’s budget by ${money(st.spent - st.budgetTotal)}`
+        ? `<span class="bad">Spent ${money(st.spent - st.budgetTotal)} more than this month’s budget.</span>`
         : `${Math.round(budgetLeftPct)}% of this month’s budget still left`;
+    const over = overLine(st);
     const payList = monthPaychecks(ym);
     const payHTML = payList.length
       ? `<div class="list">${payList.map((p) => `
           <button class="row" data-action="edit-paycheck" data-id="${esc(p.id)}">
-            <span class="row-main"><span class="row-title">${esc(p.note || 'Paycheck')}</span><span class="row-sub">${shortDate(p.date)}</span></span>
-            <span class="row-end"><span class="amt good">+${money(p.amount)}</span></span>${ICON.chev}
+            <span class="row-main"><span class="row-title">${esc(p.note || 'Paycheck')}</span><span class="row-sub">${shortDate(p.date)} · tap to change</span></span>
+            <span class="row-end"><span class="amt good">${plusMoney(p.amount)}</span></span>${ICON.chev}
           </button>`).join('')}</div>`
-      : '<div class="card empty"><strong>No paycheck yet</strong>Money on hand starts at $0. Add a paycheck when you get paid.</div>';
+      : '<div class="card empty"><strong>No paycheck yet</strong>Money on hand starts at $0.00. Add a paycheck when you get paid.</div>';
     return `
       ${pageHead('', monthLabel(ym, { month: 'long' }), esc(sub))}
       <section class="hero hero-circle" aria-label="Left to spend">
         <div class="hero-ring-wrap">
           ${bar(overall ? st.budgetTotal : Math.max(0, budgetLeft), st.budgetTotal || 1, { over: overall, large: true })}
           <div class="hero-ring-center">
-            <div class="hero-label">Left to spend</div>
-            <div class="hero-amount ${shownLeft < 0 ? 'neg' : ''}" id="left-to-spend">${money(shownLeft)}</div>
-            <div class="hero-daily"><strong class="${shownDaily < 0 ? 'neg' : ''}">${money(shownDaily)}</strong> per day</div>
+            <div class="hero-label">${overspent ? 'Overspent' : 'Left to spend'}</div>
+            <div class="hero-amount ${overspent ? 'neg' : ''} ${money(st.left).length > 9 ? 'long' : ''}" id="left-to-spend">${money(st.left)}</div>
+            <div class="hero-daily">${centerSmall}</div>
           </div>
         </div>
         <div class="hero-caption ring-caption">${ringCaption}</div>
-        <div class="hero-stats hero-stats-2">
+        <div class="hero-stats">
           <div class="hero-stat"><span>Paychecks</span><strong>${money(st.income)}</strong></div>
-          <div class="hero-stat"><span>Days left</span><strong>${st.daysLeft}</strong></div>
+          <div class="hero-stat"><span>Bills to pay</span><strong>${money(st.unpaidFixed)}</strong></div>
+          <div class="hero-stat"><span>Savings to go</span><strong>${money(st.stillToSave)}</strong></div>
         </div>
+        ${waiting ? '' : `<div class="hero-caption plan-line" id="plan-line">${planLine(st)}</div>`}
+        ${over ? `<div class="hero-caption plan-line bad">${over}</div>` : ''}
       </section>
 
       <h2 class="section-title"><span>Paychecks</span><button class="link" data-action="add-paycheck">Add</button></h2>
@@ -502,40 +557,40 @@
       <button class="btn" data-action="add" data-type="purchase">${ICON.plus} Add purchase</button>
 
       <h2 class="section-title"><span>Savings this month</span><button class="link" data-action="add" data-type="savings">Add</button></h2>
-      <section class="card">
+      <button type="button" ${cardButton} data-action="add" data-type="savings">
         <div class="metric">
-          ${bar(st.saved, st.plan, { variant: st.saved >= st.plan ? '' : 'violet', thick: true })}
+          ${bar(Math.max(0, st.saved), st.plan, { variant: st.saved >= st.plan ? '' : 'violet', thick: true })}
           <div class="metric-body">
-            <div class="big-pair"><span class="big ${st.saved >= st.plan ? 'good' : ''}">${money(st.saved)}</span><span class="of">of ${money(st.plan)} plan</span></div>
-            <p class="note">${st.stillToSave > 0 ? `${money(st.stillToSave)} still to save this month.` : 'Savings plan met for this month.'}${st.extra > 0 ? ` Includes the extra 3rd paycheck (+${money(st.extra)}).` : ''}</p>
+            <div class="big-pair"><span class="big ${st.saved >= st.plan && st.plan > 0 ? 'good' : ''}">${money(st.saved)}</span><span class="of">of ${money(st.plan)} plan</span></div>
+            <p class="note">${st.stillToSave > 0 ? `${money(st.stillToSave)} still to save this month.` : 'Savings plan met for this month.'}${st.extra > 0 ? ` Includes the extra 3rd paycheck (+${money(st.extra)}).` : ''} Tap to add savings.</p>
           </div>
         </div>
-      </section>
+      </button>
 
       <h2 class="section-title"><span>Emergency fund</span><button class="link" data-action="tab" data-tab="goals">Goals</button></h2>
-      <section class="card">
+      <button type="button" ${cardButton} data-action="add-goal-savings" data-goal="">
         <div class="metric">
           ${bar(ef, efGoal, { variant: ef >= efGoal ? '' : 'violet', thick: true })}
           <div class="metric-body">
-            <div class="big-pair"><span class="big">${money(ef)}</span><span class="of">of ${money(efGoal)}</span></div>
-            <p class="note">${ef >= efGoal ? 'Fully funded.' : `${money(efGoal - ef)} to go.`} Total saved: ${money(total)}.</p>
+            <div class="big-pair"><span class="big">${money(efTotal)}</span><span class="of">of ${money(efGoal)}</span></div>
+            <p class="note">${efTotal >= efGoal ? 'Fully funded.' : `${money(efGoal - efTotal)} to go.`} Tap to add savings.</p>
           </div>
         </div>
-      </section>
+      </button>
 
       <h2 class="section-title"><span>Still due this month</span>${due.amount > 0 ? `<span>${money(due.amount)}</span>` : ''}</h2>
       <section class="card">${dueHTML}</section>
 
       <h2 class="section-title"><span>How it adds up</span></h2>
       <section class="card">
-        <div class="kv"><span class="k">Paychecks</span><span class="v">${money(st.income)}</span></div>
-        <div class="kv"><span class="k">Spent so far</span><span class="v">−${money(st.spent)}</span></div>
-        <div class="kv"><span class="k">Saved so far</span><span class="v">−${money(st.saved)}</span></div>
-        <div class="kv total"><span class="k">Left this month</span><span class="v ${st.left < 0 ? 'bad' : ''}">${money(st.left)}</span></div>
-        <div class="kv"><span class="k">Savings still to go</span><span class="v">−${money(st.stillToSave)}</span></div>
-        <div class="kv"><span class="k">Fixed bills not paid yet</span><span class="v">−${money(st.unpaidFixed)}</span></div>
-        <div class="kv total"><span class="k">Left to spend</span><span class="v ${st.flexible < 0 ? 'bad' : 'good'}">${money(st.flexible)}</span></div>
-        <p class="note">Room left if every bill and the savings plan are fully used: <b class="${st.cushion < 0 ? 'bad' : 'good'}">${money(st.cushion)}</b>. Only paychecks you add count as money in.</p>
+        <div class="kv"><span class="k">Paychecks added</span><span class="v">${money(st.income)}</span></div>
+        <div class="kv"><span class="k">Spent so far</span><span class="v">${minus(st.spent)}</span></div>
+        <div class="kv"><span class="k">Moved to savings</span><span class="v">${minus(st.saved)}</span></div>
+        <div class="kv total"><span class="k">Left to spend (on hand)</span><span class="v ${overspent ? 'bad' : ''}">${money(st.left)}</span></div>
+        <div class="kv"><span class="k">Fixed bills not paid yet</span><span class="v">${money(st.unpaidFixed)}</span></div>
+        <div class="kv"><span class="k">Savings still to go</span><span class="v">${money(st.stillToSave)}</span></div>
+        <div class="kv total"><span class="k">${st.free >= 0 ? 'Free after bills &amp; savings' : (st.checksToCome > 0 ? 'Covered by next paycheck' : 'Still needed for the plan')}</span><span class="v ${st.free >= 0 ? 'good' : ''}">${money(Math.abs(st.free))}</span></div>
+        <p class="note">Month plan: bills ${money(st.budgetTotal)} + savings ${money(st.plan)} = ${money(st.budgetTotal + st.plan)}. Only paychecks you add count as money in.</p>
       </section>`;
   }
 
@@ -544,15 +599,15 @@
       const out = t.amount < 0;
       return `<button class="row" data-action="edit-tx" data-id="${esc(t.id)}">
         <span class="dot" style="background:${out ? '#8D6E63' : '#43A047'}">$</span>
-        <span class="row-main"><span class="row-title">${esc(t.note || (out ? 'Savings withdrawal' : 'Savings deposit'))}</span><span class="row-sub">Savings · ${shortDate(t.date)}</span></span>
-        <span class="row-end"><span class="amt ${out ? 'bad' : 'good'}">${out ? '−' : '+'}${money(Math.abs(t.amount))}</span></span>${ICON.chev}
+        <span class="row-main"><span class="row-title">${esc(t.note || (out ? 'Took out of savings' : 'Added to savings'))}</span><span class="row-sub">${esc(goalName(goalIdOf(t)))}${t.src === 'had' ? ' · already had' : ''} · ${shortDate(t.date)}</span></span>
+        <span class="row-end"><span class="amt ${out ? 'bad' : 'good'}">${out ? minus(t.amount) : plusMoney(t.amount)}</span></span>${ICON.chev}
       </button>`;
     }
     const c = categoryOf(t.category);
     return `<button class="row" data-action="edit-tx" data-id="${esc(t.id)}">
       <span class="dot" style="background:${c.color}">${esc(c.name.charAt(0).toUpperCase())}</span>
       <span class="row-main"><span class="row-title">${esc(t.note || c.name)}</span><span class="row-sub">${esc(c.name)} · ${shortDate(t.date)}</span></span>
-      <span class="row-end"><span class="amt">−${money(t.amount)}</span></span>${ICON.chev}
+      <span class="row-end"><span class="amt">${minus(t.amount)}</span></span>${ICON.chev}
     </button>`;
   }
 
@@ -587,7 +642,7 @@
       <div class="chips">
         <div class="chip-stat"><span>Spent</span><strong>${money(st.spent)}</strong></div>
         <div class="chip-stat"><span>Saved</span><strong class="good">${money(st.saved)}</strong></div>
-        <div class="chip-stat"><span>Left over</span><strong class="${st.left < 0 ? 'bad' : ''}">${money(st.left)}</strong></div>
+        <div class="chip-stat"><span>On hand</span><strong class="${st.left < 0 ? 'bad' : ''}">${money(st.left)}</strong></div>
       </div>
       ${groups.length
         ? groups.map((g) => `<div class="day-label">${esc(dayTitle(g.date))}</div><div class="list">${g.items.map((ev) => ev.html).join('')}</div>`).join('')
@@ -617,7 +672,7 @@
         <div class="hero-amount" style="font-size:44px">${money(t.monthly)}</div>
         <div class="hero-caption">${money(t.yearly)} per year</div>
         <div class="hero-stats" style="grid-template-columns:1fr 1fr">
-          <div class="hero-stat"><span>Canceling saves / mo</span><strong class="${t.cancelMonthly > 0 ? '' : ''}">${money(t.cancelMonthly)}</strong></div>
+          <div class="hero-stat"><span>Canceling saves / mo</span><strong>${money(t.cancelMonthly)}</strong></div>
           <div class="hero-stat"><span>Canceling saves / yr</span><strong>${money(t.cancelYearly)}</strong></div>
         </div>
       </section>
@@ -635,24 +690,29 @@
   function viewGoals() {
     const total = totalSavings();
     const efGoal = state.settings.emergencyGoal;
-    const ef = Math.min(total, efGoal);
+    const efTotal = efSaved();
+    const ef = Math.max(0, Math.min(efTotal, efGoal));
+    const st = monthStats(currentYM());
     const goals = state.goals.map((g) => {
       const gi = goalInfo(g);
       let line;
       if (gi.done) line = '<span class="good">Goal reached!</span>';
-      else if (!g.date) line = 'Add a target date to see the monthly amount.';
+      else if (!g.date) line = `${money(gi.left)} to go`;
       else if (gi.passed) line = `<span class="bad">Target date passed</span> · ${money(gi.left)} to go`;
-      else line = `<b>${money(gi.perMonth)}/mo</b> needed for ${gi.months} month${gi.months === 1 ? '' : 's'} · ${money(gi.left)} to go`;
-      return `<button ${cardButton} data-action="edit-goal" data-id="${esc(g.id)}">
-        <div class="card-head"><h3>${esc(g.name)}</h3><span class="meta">${g.date ? `by ${parseISO(g.date).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })}` : 'No date'}</span></div>
-        <div class="metric">
-          ${bar(g.saved, g.target, { variant: gi.done ? '' : 'violet', thick: true })}
-          <div class="metric-body">
-            <div class="big-pair"><span class="big">${money(g.saved)}</span><span class="of">of ${money(g.target)} · ${Math.round(gi.progress)}%</span></div>
-            <p class="note">${line}</p>
+      else line = `<b>${money(gi.perMonth)}/mo</b> for ${gi.months} month${gi.months === 1 ? '' : 's'} · ${money(gi.left)} to go`;
+      return `<div class="card goal-card">
+        <div class="card-head"><h3>${esc(g.name)}</h3><button type="button" class="link small" data-action="edit-goal" data-id="${esc(g.id)}">Edit</button></div>
+        <button type="button" class="goal-tap" data-action="add-goal-savings" data-goal="${esc(g.id)}" aria-label="Add savings to ${esc(g.name)}">
+          <div class="metric">
+            ${bar(Math.max(0, gi.saved), g.target, { variant: gi.done ? '' : 'violet', thick: true })}
+            <div class="metric-body">
+              <div class="big-pair"><span class="big">${money(gi.saved)}</span><span class="of">of ${money(g.target)} · ${Math.round(gi.progress)}%</span></div>
+              <p class="note">${line}${g.date ? ` · by ${esc(parseISO(g.date).toLocaleDateString('en-US', { month: 'short', year: 'numeric' }))}` : ''}</p>
+            </div>
           </div>
-        </div>
-      </button>`;
+          <span class="add-pill">${ICON.plus} Add savings</span>
+        </button>
+      </div>`;
     }).join('');
     const debts = state.debts.map((d) => {
       const di = debtInfo(d);
@@ -669,22 +729,43 @@
         <div class="card-head"><h3>${esc(d.name)}</h3><span class="meta">${money(d.payment)}/mo</span></div>${body}
       </button>`;
     }).join('');
+    const recent = savingsTx()
+      .sort((a, b) => b.date.localeCompare(a.date) || (b.created || 0) - (a.created || 0));
+    const shown = recent.slice(0, 12);
 
     return `
       ${pageHead('', 'Goals', `Total saved ${money(total)}`, `<button class="head-btn" data-action="add-goal" aria-label="Add goal">${ICON.plus}</button>`)}
-      <section class="hero">
+      <button type="button" class="hero hero-tap" data-action="add-goal-savings" data-goal="" aria-label="Add savings to emergency fund">
         <div class="metric">
           ${bar(ef, efGoal, { variant: ef >= efGoal ? '' : 'violet', thick: true })}
           <div class="metric-body">
             <div class="hero-label">Emergency fund</div>
-            <div class="hero-amount" style="font-size:40px">${money(ef)}</div>
+            <div class="hero-amount" style="font-size:36px" id="ef-amount">${money(efTotal)}</div>
             <div class="hero-caption">of ${money(efGoal)} goal · ${Math.round(pct(ef, efGoal))}%</div>
           </div>
         </div>
-        <div class="hero-caption" style="margin-top:12px">${ef >= efGoal ? `Fully funded${total > efGoal ? ` · ${money(total - efGoal)} extra saved` : ''}` : `${money(efGoal - ef)} to go · built from your total savings`}</div>
+        <div class="hero-caption" style="margin-top:12px">${efTotal >= efGoal ? `Fully funded${efTotal > efGoal ? ` · ${money(efTotal - efGoal)} extra saved` : ''}` : `${money(efGoal - efTotal)} to go`}</div>
+        <span class="add-pill on-hero">${ICON.plus} Add savings</span>
+      </button>
+      <section class="card">
+        <div class="metric">
+          ${bar(Math.max(0, st.saved), st.plan, { variant: st.saved >= st.plan ? '' : 'violet' })}
+          <div class="metric-body">
+            <div class="metric-title">Saved this month</div>
+            <div class="big-pair" style="margin:0"><span class="big sm ${st.saved >= st.plan && st.plan > 0 ? 'good' : ''}">${money(st.saved)}</span><span class="of">of ${money(st.plan)} plan</span></div>
+            <p class="note">${st.stillToSave > 0 ? `${money(st.stillToSave)} left for this month’s plan.` : 'This month’s savings plan is met.'} Savings from your pay count toward it.</p>
+          </div>
+        </div>
       </section>
+
       <h2 class="section-title"><span>Goals</span><button class="link" data-action="add-goal">Add</button></h2>
-      ${goals || '<div class="card empty"><strong>No custom goals yet</strong>Saving for something? Add a goal to see how much to put away each month.</div>'}
+      ${goals || '<div class="card empty"><strong>No custom goals yet</strong>Saving for something else? Add a goal, then tap it to add money as you save.</div>'}
+
+      <h2 class="section-title"><span>Savings added</span>${recent.length ? `<span>${recent.length} total</span>` : ''}</h2>
+      ${shown.length
+        ? `<div class="list">${shown.map(txRow).join('')}</div><p class="note" style="margin:-4px 4px 0">Tap one to change the amount or remove it.${recent.length > shown.length ? ' Older ones are in Activity.' : ''}</p>`
+        : '<div class="card empty"><strong>Nothing added yet</strong>Tap the emergency fund or a goal to add what you put in savings.</div>'}
+
       <h2 class="section-title"><span>Debts</span><button class="link" data-action="add-debt">Add</button></h2>
       ${debts || '<div class="card empty"><strong>No debts</strong>Nice.</div>'}
       <p class="note" style="margin:0 4px">Payoff month counts this month as the first payment. Update the balance as you pay it down.</p>`;
@@ -729,7 +810,7 @@
 
       <h2 class="section-title"><span>Bills</span><button class="link" data-action="add-bill">Add</button></h2>
       <div class="list">${bills || '<div class="empty">No bills</div>'}</div>
-      <p class="note" style="margin:-4px 4px 0">Fixed bills are held back from “Left to spend” until you log them. The Subscriptions line comes from the Subscriptions tab.</p>
+      <p class="note" style="margin:-4px 4px 0">Fixed bills show under “Bills to pay” on Home until you log them. The Subscriptions line comes from the Subscriptions tab.</p>
 
       <h2 class="section-title"><span>Savings &amp; goals</span></h2>
       <div class="list">
@@ -771,19 +852,23 @@
     return `<button class="row" data-action="edit-paycheck" data-id="${esc(p.id)}">
       <span class="dot" style="background:#7E57C2">$</span>
       <span class="row-main"><span class="row-title">${esc(p.note || 'Paycheck')}</span><span class="row-sub">Paycheck · ${shortDate(p.date)}</span></span>
-      <span class="row-end"><span class="amt good">+${money(p.amount)}</span></span>${ICON.chev}
+      <span class="row-end"><span class="amt good">${plusMoney(p.amount)}</span></span>${ICON.chev}
     </button>`;
   }
 
   function viewStart() {
+    const st = monthStats(currentYM());
+    const homeSub = st.checks === 0 && st.count === 0
+      ? 'Add a paycheck to start'
+      : st.left < 0 ? `Overspent ${money(-st.left)}` : `${money(st.left)} left to spend`;
     const tiles = [
-      { tab: 'home', title: 'Home', sub: 'Circle budget', wide: true },
+      { tab: 'home', title: 'Home', sub: homeSub, wide: true, id: 'start-home-sub' },
       { action: 'add-paycheck', title: 'Add paycheck' },
       { action: 'add', type: 'purchase', title: 'Add purchase' },
       { action: 'add', type: 'savings', title: 'Add savings' },
       { tab: 'activity', title: 'Activity' },
       { tab: 'subs', title: 'Subscriptions' },
-      { tab: 'goals', title: 'Goals' },
+      { tab: 'goals', title: 'Goals', sub: `${money(totalSavings())} saved` },
       { tab: 'settings', title: 'Settings' },
     ];
     return `
@@ -799,7 +884,7 @@
               : `data-action="${t.action}"${t.type ? ` data-type="${t.type}"` : ''}`;
             return `<button type="button" class="start-tile${t.wide ? ' wide' : ''}" ${attrs}>
               <span class="start-title">${esc(t.title)}</span>
-              ${t.sub ? `<span class="start-sub">${esc(t.sub)}</span>` : ''}
+              ${t.sub ? `<span class="start-sub"${t.id ? ` id="${t.id}"` : ''}>${esc(t.sub)}</span>` : ''}
             </button>`;
           }).join('')}
         </div>
@@ -892,29 +977,41 @@
     }
   }
 
-  function openTxSheet(tx, presetType = 'purchase') {
+  function openTxSheet(tx, presetType = 'purchase', presetGoal = null) {
     const editing = !!tx;
     const cats = categories();
     const known = (id) => id && cats.some((c) => c.id === id);
-    const type = tx ? tx.type : presetType;
+    const type = tx ? tx.type : (presetGoal != null ? 'savings' : presetType);
     const cat = tx ? (known(tx.category) ? tx.category : 'other') : (known(ui.lastCategory) ? ui.lastCategory : cats[0].id);
+    const goalSel = tx ? goalIdOf(tx) : (presetGoal && state.goals.some((g) => g.id === presetGoal) ? presetGoal : '');
+    const goalOpts = [{ id: '', name: 'Emergency fund' }, ...state.goals.map((g) => ({ id: g.id, name: g.name }))];
+    const goalPicker = state.goals.length
+      ? `<div class="pick-label">Put toward</div><div class="cat-grid goal-grid" role="radiogroup" aria-label="Put toward">${goalOpts.map((g) =>
+          `<button type="button" class="cat-chip goal-chip ${g.id === goalSel ? 'on' : ''}" role="radio" aria-checked="${g.id === goalSel}" data-goal="${esc(g.id)}"><i style="background:var(--violet)"></i>${esc(g.name)}</button>`).join('')}</div>`
+      : '<p class="field-hint" style="margin:0 4px 14px">Goes to your emergency fund.</p>';
+    const fromGoal = presetGoal != null && !editing;
     const body = `
-      ${segHTML('type', [['purchase', 'Purchase'], ['savings', 'Savings']], type)}
-      <div class="amount-field"><span>$</span><input name="amount" ${moneyAttr} placeholder="0.00" aria-label="Amount" value="${tx ? esc(String(Math.abs(tx.amount))) : ''}"></div>
+      <div ${fromGoal ? 'hidden' : ''}>${segHTML('type', [['purchase', 'Purchase'], ['savings', 'Savings']], type)}</div>
+      <div class="amount-field"><span>$</span><input name="amount" ${moneyAttr} placeholder="0.00" aria-label="Amount" value="${tx ? esc(amountStr(tx.amount)) : ''}"></div>
       <div data-when="type:purchase">
         <div class="cat-grid" role="radiogroup" aria-label="Category">${cats.map((c) =>
           `<button type="button" class="cat-chip ${c.id === cat ? 'on' : ''}" role="radio" aria-checked="${c.id === cat}" data-cat="${esc(c.id)}"><i style="background:${c.color}"></i>${esc(c.name)}</button>`).join('')}</div>
       </div>
-      <div data-when="type:savings">${segHTML('dir', [['in', 'Deposit'], ['out', 'Withdraw']], tx && tx.amount < 0 ? 'out' : 'in')}</div>
+      <div data-when="type:savings">${segHTML('dir', [['in', 'Put in'], ['out', 'Took out']], tx && tx.amount < 0 ? 'out' : 'in')}${goalPicker}
+        ${segHTML('src', [['pay', 'From my pay'], ['had', 'Already had it']], tx && tx.src === 'had' ? 'had' : 'pay')}
+        <p class="field-hint" style="margin:-6px 4px 14px">“From my pay” counts toward this month’s ${money(state.settings.savingsPlan)} plan. “Already had it” only adds to the goal.</p></div>
       <div class="field-list">
         ${field('Note', `<input name="note" type="text" maxlength="120" placeholder="Optional" autocomplete="off" enterkeyhint="done" value="${esc(tx?.note || '')}">`)}
         ${field('Date', `<input name="date" type="date" required value="${esc(tx?.date || todayISO())}">`)}
       </div>
       <div class="form-error" role="alert"></div>
-      ${editing ? '<button type="button" class="btn danger" data-del>Delete transaction</button>' : ''}`;
+      ${editing ? `<button type="button" class="btn danger" data-del>${tx.type === 'savings' ? 'Remove this savings entry' : 'Delete purchase'}</button>` : ''}`;
 
+    const title = editing
+      ? (tx.type === 'savings' ? 'Edit savings' : 'Edit purchase')
+      : (presetGoal != null ? `Add to ${goalName(goalSel)}` : type === 'savings' ? 'Add savings' : 'Add purchase');
     openSheet({
-      title: editing ? 'Edit transaction' : 'Add',
+      title,
       saveLabel: editing ? 'Save' : 'Add',
       body,
       onMount: (el) => {
@@ -923,9 +1020,9 @@
         fitAmount(el.querySelector('[name="amount"]'));
         const del = el.querySelector('[data-del]');
         if (del) del.addEventListener('click', () => {
-          if (!confirm('Delete this transaction?')) return;
+          if (!confirm(tx.type === 'savings' ? 'Remove this savings entry?' : 'Delete this purchase?')) return;
           state.transactions = state.transactions.filter((t) => t.id !== tx.id);
-          commit(); closeSheet(); toast('Transaction deleted');
+          commit(); closeSheet(); toast(tx.type === 'savings' ? 'Savings entry removed' : 'Purchase deleted');
         });
         if (!editing) el.querySelector('[name="amount"]').focus({ preventScroll: true });
       },
@@ -936,16 +1033,18 @@
         if (amount == null || amount <= 0) return formError(el, 'Enter an amount greater than $0.');
         if (amount >= 1e7) return formError(el, 'That amount looks too large.');
         if (!isISODate(date)) return formError(el, 'Pick a date.');
-        const category = kind === 'purchase' ? (el.querySelector('.cat-chip.on')?.dataset.cat || 'other') : 'savings';
+        const category = kind === 'purchase' ? (el.querySelector('.cat-chip[data-cat].on')?.dataset.cat || 'other') : 'savings';
+        const goal = kind === 'savings' ? (el.querySelector('.goal-chip.on')?.dataset.goal ?? goalSel) : '';
         const signed = kind === 'savings' && segVal(el, 'dir') === 'out' ? -amount : amount;
-        const record = { type: kind, amount: signed, category, note: valueOf(el, 'note').slice(0, 120), date };
+        const src = kind === 'savings' && segVal(el, 'src') === 'had' ? 'had' : '';
+        const record = { type: kind, amount: signed, category, goal, src, note: valueOf(el, 'note').slice(0, 120), date };
         if (editing) Object.assign(tx, record);
         else state.transactions.push({ id: uid(), created: Date.now(), ...record });
         if (kind === 'purchase') ui.lastCategory = category;
         commit();
         if (editing) toast('Saved');
         else if (kind === 'purchase') toast(`Added ${money(amount)} · ${categoryOf(category).name}`);
-        else toast(`${signed < 0 ? 'Withdrew' : 'Saved'} ${money(amount)}`);
+        else toast(`${signed < 0 ? 'Took out' : 'Saved'} ${money(amount)} · ${goalName(goal)}`);
         return true;
       },
     });
@@ -958,7 +1057,7 @@
       title: editing ? 'Edit paycheck' : 'Add paycheck',
       saveLabel: editing ? 'Save' : 'Add',
       body: `
-        <div class="amount-field"><span>$</span><input name="amount" ${moneyAttr} placeholder="0.00" aria-label="Paycheck amount" value="${esc(money(editing ? item.amount : usual))}"></div>
+        <div class="amount-field"><span>$</span><input name="amount" ${moneyAttr} placeholder="0.00" aria-label="Paycheck amount" value="${esc(amountStr(editing ? item.amount : usual))}"></div>
         <p class="field-hint">Starts at your usual paycheck (${money(usual)}). Change it if this check was more or less.</p>
         <div class="field-list">
           ${field('Date', `<input name="date" type="date" required value="${esc(item?.date || todayISO())}">`)}
@@ -1048,14 +1147,16 @@
   function openGoalSheet(item) {
     openItemSheet({
       item, listKey: 'goals', noun: 'goal',
+      confirmDelete: 'Delete this goal? Savings you added to it will move to your emergency fund.',
+      onDelete: (goal) => { for (const t of state.transactions) if (t.goal === goal.id) t.goal = ''; },
       body: `
         <div class="field-list">
           ${field('Name', `<input name="name" type="text" maxlength="60" placeholder="New car" autocomplete="off" value="${esc(item?.name || '')}">`)}
-          ${field('Target', `<input name="target" ${moneyAttr} placeholder="$0" value="${item ? esc(money(item.target)) : ''}">`)}
-          ${field('Saved so far', `<input name="saved" ${moneyAttr} placeholder="$0" value="${item ? esc(money(item.saved)) : ''}">`)}
+          ${field('Target', `<input name="target" ${moneyAttr} placeholder="$0.00" value="${item ? esc(money(item.target)) : ''}">`)}
+          ${field('Already had', `<input name="saved" ${moneyAttr} placeholder="$0.00" value="${item ? esc(money(item.saved)) : ''}">`)}
           ${field('Target date', `<input name="date" type="date" value="${esc(item?.date || '')}">`)}
         </div>
-        <p class="field-hint">Needed per month = what’s left ÷ months until the target date (min 1). Update “Saved so far” as you go.</p>`,
+        <p class="field-hint">“Already had” is money saved for this before you started. After that, tap the goal on the Goals screen to add savings${item ? ` (added so far: ${money(goalSaved(item) - item.saved)})` : ''}. Target date is optional.</p>`,
       read: (el) => {
         const name = valueOf(el, 'name');
         const target = parseMoney(valueOf(el, 'target'));
@@ -1063,7 +1164,7 @@
         const date = valueOf(el, 'date');
         if (!name) return formError(el, 'Give the goal a name.');
         if (target == null || target <= 0) return formError(el, 'Enter a target amount.');
-        if (saved < 0) return formError(el, 'Saved can’t be negative.');
+        if (saved < 0) return formError(el, '“Already had” can’t be negative.');
         return { name: name.slice(0, 60), target, saved, date: isISODate(date) ? date : '' };
       },
     });
@@ -1076,7 +1177,7 @@
         <div class="field-list">
           ${field('Name', `<input name="name" type="text" maxlength="60" placeholder="Credit card" autocomplete="off" value="${esc(item?.name || '')}">`)}
           ${field('Balance left', `<input name="balance" ${moneyAttr} placeholder="Unknown" value="${item && item.balance != null ? esc(money(item.balance)) : ''}">`)}
-          ${field('Monthly payment', `<input name="payment" ${moneyAttr} placeholder="$0" value="${item ? esc(money(item.payment)) : ''}">`)}
+          ${field('Monthly payment', `<input name="payment" ${moneyAttr} placeholder="$0.00" value="${item ? esc(money(item.payment)) : ''}">`)}
         </div>
         <p class="field-hint">Leave the balance blank if you don’t know it yet.</p>`,
       read: (el) => {
@@ -1100,7 +1201,7 @@
       body: `
         <div class="field-list">
           ${field('Name', `<input name="name" type="text" maxlength="40" placeholder="Car insurance" autocomplete="off" value="${esc(item?.name || '')}">`)}
-          ${field('Monthly budget', `<input name="amount" ${moneyAttr} placeholder="$0" value="${item ? esc(money(item.amount)) : ''}">`)}
+          ${field('Monthly budget', `<input name="amount" ${moneyAttr} placeholder="$0.00" value="${item ? esc(money(item.amount)) : ''}">`)}
           ${field('Due day', `<input name="dueDay" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="2" placeholder="None (1–31)" autocomplete="off" value="${item?.dueDay ?? ''}">`)}
           <div class="field"><span class="flabel">Type</span>${segHTML('fixed', [['fixed', 'Fixed'], ['flex', 'Flexible']], item ? (item.fixed ? 'fixed' : 'flex') : 'fixed')}</div>
         </div>
@@ -1123,7 +1224,7 @@
       const st = monthStats(ym);
       return `<button type="button" class="hist-row" style="display:block;width:100%;text-align:left" data-action="history-month" data-ym="${ym}">
         <div class="hist-top"><strong>${esc(monthLabel(ym))}${ym === currentYM() ? ' <span class="badge due">Now</span>' : ''}</strong>
-          <span class="${st.left < 0 ? 'bad' : 'good'}" style="font-weight:700">${money(st.left)} <span class="muted" style="font-weight:400;font-size:13px">left over</span></span></div>
+          <span class="${st.left < 0 ? 'bad' : 'good'}" style="font-weight:700">${money(st.left)} <span class="muted" style="font-weight:400;font-size:13px">on hand</span></span></div>
         <div class="hist-grid">
           <div><span>Paychecks</span><b>${money(st.income)}</b></div>
           <div><span>Spent</span><b>${money(st.spent)}</b></div>
@@ -1134,7 +1235,7 @@
     }).join('');
     openSheet({
       title: 'History', tall: true,
-      body: `<p class="field-hint" style="margin:0 4px 10px">Left over = paychecks − spent − saved. Tap a month to see it.</p><div class="list">${rows}</div>`,
+      body: `<p class="field-hint" style="margin:0 4px 10px">On hand = paychecks − spent − moved to savings. Tap a month to see it.</p><div class="list">${rows}</div>`,
     });
   }
 
@@ -1429,18 +1530,19 @@
     switch (el.dataset.action) {
       case 'tab': goTab(el.dataset.tab); break;
       case 'add': openTxSheet(null, el.dataset.type || 'purchase'); break;
+      case 'add-goal-savings': openTxSheet(null, 'savings', el.dataset.goal || ''); break;
       case 'add-paycheck': openPaycheckSheet(null); break;
-      case 'edit-paycheck': openPaycheckSheet(state.paychecks.find((p) => p.id === id)); break;
+      case 'edit-paycheck': { const p = state.paychecks.find((x) => x.id === id); if (p) openPaycheckSheet(p); break; }
       case 'edit-tx': { const tx = find('transactions'); if (tx) openTxSheet(tx); break; }
       case 'month-step': ui.activityMonth = addMonths(ui.activityMonth, Number(el.dataset.step)); render(); break;
       case 'add-sub': openSubSheet(null); break;
-      case 'edit-sub': openSubSheet(find('subscriptions')); break;
+      case 'edit-sub': { const x = find('subscriptions'); if (x) openSubSheet(x); break; }
       case 'add-goal': openGoalSheet(null); break;
-      case 'edit-goal': openGoalSheet(find('goals')); break;
+      case 'edit-goal': { const x = find('goals'); if (x) openGoalSheet(x); break; }
       case 'add-debt': openDebtSheet(null); break;
-      case 'edit-debt': openDebtSheet(find('debts')); break;
+      case 'edit-debt': { const x = find('debts'); if (x) openDebtSheet(x); break; }
       case 'add-bill': openBillSheet(null); break;
-      case 'edit-bill': openBillSheet(find('bills')); break;
+      case 'edit-bill': { const x = find('bills'); if (x) openBillSheet(x); break; }
       case 'history': openHistorySheet(); break;
       case 'history-month': ui.activityMonth = el.dataset.ym; closeSheet(); goTab('activity'); break;
       case 'change-pin': Lock.show('change-current'); break;
@@ -1536,7 +1638,9 @@
       return;
     }
     if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('./service-worker.js').catch(() => { /* offline mode unavailable */ });
+      navigator.serviceWorker.register('./service-worker.js', { updateViaCache: 'none' })
+        .then((reg) => reg.update())
+        .catch(() => { /* offline mode unavailable */ });
     }
     if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
   }

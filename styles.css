@@ -419,3 +419,41 @@ body.on-start .view {
 .start-sub { margin-top: 4px; font-size: 16px; font-weight: 600; color: rgba(237, 231, 246, .82); }
 .start-tile:active { transform: scale(.97); }
 
+
+/* ---------- v5: honest totals, savings from Goals ---------- */
+.hero-circle .hero-ring-center { inset: 22px; }
+.hero-circle .hero-amount { font-size: 31px; letter-spacing: -0.02em; white-space: nowrap; }
+.hero-circle .hero-amount.long { font-size: 25px; }
+.hero-circle .hero-stats { gap: 6px; }
+.hero-circle .hero-stat { padding: 9px 8px; min-width: 0; }
+.hero-circle .hero-stat span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hero-circle .hero-stat strong { font-size: 15px; }
+.plan-line { text-align: center; margin-top: 12px; line-height: 1.35; }
+.plan-line.bad { color: var(--bad); margin-top: 6px; }
+.hero .bad, .hero-caption .bad { color: #FFB4AB; }
+
+button.hero.hero-tap { display: block; width: 100%; text-align: left; color: var(--text); }
+button.hero.hero-tap:active, .goal-tap:active, button.card:active { transform: scale(.985); }
+.add-pill {
+  display: inline-flex; align-items: center; gap: 6px; margin-top: 12px; min-height: 40px; padding: 0 16px;
+  border-radius: 999px; background: var(--surface-2); color: var(--violet); font-size: 15px; font-weight: 600;
+}
+.add-pill svg { width: 18px; height: 18px; stroke-width: 2.4; }
+.add-pill.on-hero { background: rgba(14, 14, 16, .35); color: var(--text); }
+.goal-card .card-head { margin-bottom: 6px; align-items: center; }
+.goal-card .card-head h3 { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.goal-tap { display: block; width: 100%; text-align: left; color: inherit; }
+.link.small { font-size: 15px; min-height: 36px; padding: 0 6px; }
+.pick-label { margin: 0 4px 8px; font-size: 13px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+.goal-grid .cat-chip { overflow: hidden; }
+.cat-chip { min-width: 0; }
+.big-pair { gap: 8px; }
+.big-pair .of { text-align: right; }
+.start-sub { font-variant-numeric: tabular-nums; }
+.hero-stat strong, .chip-stat strong { overflow: hidden; text-overflow: ellipsis; }
+.chips .chip-stat { min-width: 0; padding: 10px 8px; }
+.chip-stat strong { font-size: 15px; }
+.hist-grid b { font-size: 13px; }
+.hist-grid > div { min-width: 0; }
+.metric-title { font-size: 15px; font-weight: 600; color: var(--muted); }
+.big-pair .big.sm { font-size: 22px; }

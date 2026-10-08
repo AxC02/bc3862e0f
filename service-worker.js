@@ -1,9 +1,9 @@
-/* Offline support: precache the app shell, then serve from cache and
-   refresh the cache in the background. Only same-origin GET requests are
-   handled; the app never makes any other network calls. */
+/* Offline support. Network first so every update shows up right away;
+   the saved copy is only used when the phone is offline. Only same-origin
+   GET requests are handled; the app never makes any other network calls. */
 'use strict';
 
-const CACHE = 'budget-v4';
+const CACHE = 'budget-v5';
 const SHELL = [
   './',
   './index.html',
@@ -20,7 +20,8 @@ const SHELL = [
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE)
-      .then((cache) => cache.addAll(SHELL))
+      // cache:'reload' skips the browser's HTTP cache (GitHub Pages sends max-age=600).
+      .then((cache) => cache.addAll(SHELL.map((url) => new Request(url, { cache: 'reload' }))))
       .then(() => self.skipWaiting())
   );
 });
@@ -38,24 +39,16 @@ self.addEventListener('fetch', (event) => {
   if (req.method !== 'GET' || new URL(req.url).origin !== self.location.origin) return;
 
   const isPage = req.mode === 'navigate';
+  const key = isPage ? './index.html' : req;
   event.respondWith((async () => {
     const cache = await caches.open(CACHE);
-    const cached = await cache.match(isPage ? './index.html' : req, { ignoreSearch: true });
-
-    const refresh = fetch(req)
-      .then((res) => {
-        if (res && res.ok && res.type === 'basic') {
-          cache.put(isPage ? './index.html' : req, res.clone());
-        }
-        return res;
-      })
-      .catch(() => null);
-
-    if (cached) {
-      event.waitUntil(refresh);
-      return cached;
+    try {
+      const res = await fetch(req, { cache: 'no-store' });
+      if (res && res.ok && res.type === 'basic') cache.put(key, res.clone());
+      return res;
+    } catch (err) {
+      const cached = await cache.match(key, { ignoreSearch: true });
+      return cached || new Response('Offline', { status: 503, headers: { 'Content-Type': 'text/plain' } });
     }
-    const fresh = await refresh;
-    return fresh || new Response('Offline', { status: 503, headers: { 'Content-Type': 'text/plain' } });
   })());
 });
